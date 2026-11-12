@@ -83,5 +83,33 @@ class TestSessionParse(unittest.TestCase):
         with self.assertRaises(CredentialError):
             parse_session_json(raw)
 
+    def test_whole_session_paste_over_20000_chars(self):
+        # Regression for the user's report: pasting the whole session
+        # export exceeds the old 20000-char server limit. A large JSON
+        # (sessionToken + 25 KB of unrelated fields) must still parse
+        # to just the session cookie.
+        import json
+        raw = json.dumps({
+            "WARNING_BANNER": "DO NOT SHARE",
+            "accessToken": "eyJhbGciOiJSUzI1NiJ9." + "x" * 2000,
+            "sessionToken": LONG,
+            "user": {"id": "user-123", "note": "y" * 25000},
+        })
+        self.assertGreater(len(raw), 20000)
+        cs = parse_session_json(raw)
+        self.assertEqual(len(cs), 1)
+        self.assertEqual(cs[0]["value"], LONG)
+
+    def test_whole_cookie_header_with_junk(self):
+        # A full Cookie header with many unrelated cookies: only the
+        # session cookie (and its chunks) may be kept.
+        raw = ("oai-did=abc123; __Secure-next-auth.session-token=" + LONG +
+               "; _cf_bm=zzz; oai-next-auth=qqq")
+        cs = parse_session_cookie(raw)
+        names = {c["name"] for c in cs}
+        self.assertIn("__Secure-next-auth.session-token", names)
+        self.assertNotIn("oai-did", names)
+        self.assertNotIn("_cf_bm", names)
+
 if __name__ == "__main__":
     unittest.main()

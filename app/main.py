@@ -39,7 +39,13 @@ logging.getLogger("uvicorn.access").disabled = True
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "2"))
-MAX_CREDENTIAL_CHARS = 20000
+# Backstop only: the frontend already extracts just the session cookie
+# before sending, so a normal paste is < 2 KB. A raw export pasted
+# whole (full cookie header / full session JSON) can be tens of KB,
+# so the server accepts up to 200 KB and lets session_parse.py pick
+# out the session cookie segments. Anything larger is almost certainly
+# a wrong paste (e.g. a whole page), not a session.
+MAX_CREDENTIAL_CHARS = 200000
 
 app = FastAPI(title="ChatGPT 订阅与账单查询", version="0.1.0")
 
@@ -78,7 +84,7 @@ async def create_job(req: Request):
     if not isinstance(credential, str) or not credential.strip():
         raise HTTPException(400, "请先粘贴 session")
     if len(credential) > MAX_CREDENTIAL_CHARS:
-        raise HTTPException(400, "粘贴的内容过长（超过 20000 字符）")
+        raise HTTPException(400, "粘贴的内容过长（超过 200000 字符）。请只粘贴 session 本身，不要粘贴整个网页或文件。")
 
     # Rate limit: 10 jobs / IP / hour (best effort, in memory).
     ip = req.client.host if req.client else "unknown"
