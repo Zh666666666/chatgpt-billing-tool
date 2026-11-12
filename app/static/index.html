@@ -62,6 +62,7 @@ code{background:#eee;padding:1px 5px;border-radius:5px;font-size:13px}
 <div id="errBox" class="card hidden"><div class="err" id="errText"></div></div>
 <div id="result" class="hidden">
   <div class="card" id="subCard"><h2 style="font-size:17px;margin:0 0 8px">订阅信息（仅展示实际获取到的数据）</h2><div id="subBody"></div></div>
+  <div class="card hidden" id="portalCard"><h2 style="font-size:17px;margin:0 0 8px">工作空间账单（Stripe 门户）</h2><div id="portalBody"></div></div>
   <div class="card"><h2 style="font-size:17px;margin:0 0 8px">订阅 / 账单页面截图</h2><div id="shots"></div></div>
   <div class="card"><h2 style="font-size:17px;margin:0 0 8px">账单</h2><div id="invBody"></div></div>
 </div>
@@ -71,7 +72,8 @@ code{background:#eee;padding:1px 5px;border-radius:5px;font-size:13px}
 2）<b>浏览器人机验证</b>：遇到 Cloudflare / Turnstile，本工具不自动解验证，请稍后重试。<br>
 3）<b>HTTP 403</b>：服务端拒绝了本次访问。有效 session 不等于服务端一定放行。<br>
 4）<b>Apple / Google Play 订阅</b>：发票不在 Stripe，由苹果/谷歌开具，本页会如实说明，不会凭空生成 PDF。<br>
-5）本工具不保证一定成功；失败时会明确写出失败阶段，不会只给一个入口链接。</p></details></div>
+5）<b>Business 工作空间</b>：账单在 Stripe 门户里（订阅、付款方式、发票记录）。如果下一笔付款为 US$0.00（全额折扣），门户没有发票记录是正常的。<br>
+6）本工具不保证一定成功；失败时会明确写出失败阶段，不会只给一个入口链接。</p></details></div>
 </main>
 <script>
 const $=s=>document.querySelector(s);
@@ -104,6 +106,12 @@ async function poll(){
     $("#result").classList.remove("hidden");
     const s=j.subscription;
     $("#subBody").innerHTML=s?Object.entries(s).filter(([k])=>k!=="source_text_excerpt").map(([k,v])=>`<div><b>${esc(k)}</b>：${esc(v)}</div>`).join("")+`<p class="note">来源页面原文摘录：${esc(s.source_text_excerpt||"")}</p>`:`<p>本次在页面上没有识别到可确认的订阅字段（例如套餐、续费时间）。请查看下方截图核对；未找到的字段不会凭空填写。</p><p class="note">计费平台：${esc(j.billing_platform||"未知")}</p>`;
+    const pb=j.portal_billing;
+    if(pb){
+      $("#portalCard").classList.remove("hidden");
+      $("#portalBody").innerHTML=Object.entries(pb).filter(([k])=>k!=="source_text_excerpt").map(([k,v])=>`<div><b>${esc(k)}</b>：${esc(v)}</div>`).join("")+`<p class="note">来源页面原文摘录：${esc(pb.source_text_excerpt||"")}</p>`;
+      if(pb.invoice_history_empty&&pb.next_payment==="US$0.00"){$("#portalBody").innerHTML+=`<p class="note">门户显示没有发票记录，且下一笔付款为 US$0.00（全额折扣）：这种订阅目前没有可下载的发票 PDF，这不是获取失败。上面这份门户订阅信息就是当前的工作空间账单。</p>`}
+    } else {$("#portalCard").classList.add("hidden")}
     renderShots(j); renderInvoices(j);
   }
 }

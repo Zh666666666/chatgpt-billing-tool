@@ -168,6 +168,39 @@ class TestInvoiceRowClick(unittest.TestCase):
             server.shutdown()
 
 
+class TestPortalBillingParsing(unittest.TestCase):
+    def test_business_portal_chinese(self):
+        from app.browser_runner import _parse_portal_billing
+        text = ("Manage your OpenAI billing settings 当前订阅 "
+                "ChatGPT Business Subscription US$25.00 /每 1 个月 "
+                "您的服务将于 2026年11月29日 更新。您的下一笔付款预计为 US$0.00 "
+                "11月29日-2026年12月29日 ChatGPT Business Subscription US$25.00 "
+                "小计 US$25.00 smb_channel_partner_talen_6ae0ca1f423c8 -US$25.00 "
+                "2030年11月29日折扣结束 合计 US$0.00 "
+                "Mastercard •••• 4675 INVOICE HISTORY No invoice history.")
+        pb = _parse_portal_billing(text)
+        self.assertIsNotNone(pb)
+        self.assertEqual(pb["plan"], "ChatGPT Business Subscription")
+        self.assertEqual(pb["next_payment"], "US$0.00")
+        self.assertEqual(pb["payment_method"], "Mastercard •••• 4675")
+        self.assertEqual(pb["renews"], "2026年11月29日")
+        self.assertTrue(pb["invoice_history_empty"])
+        self.assertIn("smb_channel_partner", pb.get("discount", ""))
+
+    def test_portal_empty_english(self):
+        from app.browser_runner import _parse_portal_billing
+        pb = _parse_portal_billing("PAYMENT METHOD No payment method. "
+            "BILLING INFORMATION Name jery INVOICE HISTORY No invoice history.")
+        self.assertIsNotNone(pb)
+        self.assertTrue(pb["invoice_history_empty"])
+        self.assertNotIn("payment_method", pb)
+
+    def test_portal_nothing_returns_none(self):
+        from app.browser_runner import _parse_portal_billing
+        self.assertIsNone(_parse_portal_billing("hello world"))
+        self.assertIsNone(_parse_portal_billing(""))
+
+
 class TestBillingPanelDetection(unittest.TestCase):
     def test_general_panel_is_not_billing(self):
         from app.browser_runner import _has_billing_content, _sidebar_has_billing

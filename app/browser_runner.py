@@ -235,6 +235,66 @@ async def _save_pdf_bytes(job, data: bytes, suggested: str | None, index: int):
     save_file(job, name, data, kind="invoice_pdf", content_type="application/pdf")
     return name
 
+def _parse_portal_billing(text: str) -> dict | None:
+    """Parse the Stripe customer portal page into billing fields.
+
+    The portal IS the workspace billing view for a Business workspace:
+    current subscription, next payment, payment method, discount and
+    invoice history. Returns None when nothing recognisable is found.
+    All values come from the page text; missing fields stay absent.
+    An empty invoice history together with a $0 next payment is a
+    normal state for a fully discounted subscription, not a failure
+    to fetch -- the caller says so explicitly.
+    """
+    if not text:
+        return None
+    flat = re.sub(r"\s+", " ", text)
+    found: dict = {}
+    plan_m = re.search(
+        r"(ChatGPT\s+(?:Business|Plus|Pro|Go|Team|Enterprise)\s+Subscription)", flat)
+    if plan_m:
+        found["plan"] = plan_m.group(1).strip()
+    amt_m = re.search(
+        r"(US\$[\d,]+\.\d{2})\s*/\s*(?:每\s*\d*\s*个月|month|mo\b)", flat)
+    if amt_m:
+        found["amount_text"] = amt_m.group(0).strip()
+    nxt_m = re.search(r"下一笔付款预计为\s*(US\$[\d,]+\.\d{2})", flat)
+    if not nxt_m:
+        nxt_m = re.search(
+            r"[Nn]ext (?:payment|invoice)[^US$]{0,40}(US\$[\d,]+\.\d{2})", flat)
+    if nxt_m:
+        found["next_payment"] = nxt_m.group(1)
+    ren_m = re.search(r"服务将于\s*([0-9年月日]+)\s*更新", flat)
+    if not ren_m:
+        ren_m = re.search(
+            r"[Rr]enews?\s+(?:on\s+)?([A-Za-z]+\s+\d{1,2},?\s*\d{4})", flat)
+    if ren_m:
+        found["renews"] = ren_m.group(1).strip()
+    per_m = re.search(
+        r"(\d{1,2}月\d{1,2}日\s*-\s*\d{4}年\d{1,2}月\d{1,2}日)", flat)
+    if not per_m:
+        per_m = re.search(
+            r"([A-Za-z]+\s+\d{1,2}\s*-\s*[A-Za-z]+\s+\d{1,2},?\s*\d{4})", flat)
+    if per_m:
+        found["current_period"] = per_m.group(1).strip()
+    pm_m = re.search(r"(Mastercard|Visa|American Express|Amex)\s*•+\s*(\d{4})", flat)
+    if pm_m:
+        found["payment_method"] = f"{pm_m.group(1)} •••• {pm_m.group(2)}"
+    disc_m = re.search(r"(smb_channel_partner[^\s]*)\s*(-US\$[\d,]+\.\d{2})", flat)
+    if disc_m:
+        d = f"{disc_m.group(1)} {disc_m.group(2)}"
+        end_m = re.search(r"(\d{4}年\d{1,2}月\d{1,2}日)折扣结束", flat)
+        if end_m:
+            d += f"，折扣至 {end_m.group(1)}"
+        found["discount"] = d
+    if "No invoice history" in flat or "没有发票记录" in flat:
+        found["invoice_history_empty"] = True
+    if not found:
+        return None
+    found["source_text_excerpt"] = flat[:600]
+    return found
+
+
 async def _try_download_from_stripe_page(page, job, invoice: dict, index: int):
     """On an invoice.stripe.com page, download the original PDF.
 
@@ -713,6 +773,13 @@ async def run_job(job: dict, cookies: list[dict]):
                                     ptext, re.S)
                                 if _nm:
                                     job["portal_billing_name"] = _nm.group(1).strip()[:60]
+                                # The portal itself is the workspace
+                                # billing view: parse its subscription,
+                                # next payment, payment method and
+                                # discount, not just invoice links.
+                                _pb = _parse_portal_billing(ptext)
+                                if _pb:
+                                    job["portal_billing"] = _pb
                                 # Stripe portal invoice rows are links; record
                                 # only rows actually rendered on the page.
                                 try:
@@ -761,6 +828,9 @@ async def run_job(job: dict, cookies: list[dict]):
                                     r"BILLING INFORMATION.*?Name\s+([^\n]+)", _pt, re.S)
                                 if _nm2:
                                     job["portal_billing_name"] = _nm2.group(1).strip()[:60]
+                                _pb2 = _parse_portal_billing(_pt)
+                                if _pb2:
+                                    job["portal_billing"] = _pb2
                             except Exception:
                                 pass
                             # chrismazanec's selector for Stripe portal
@@ -842,6 +912,18 @@ async def run_job(job: dict, cookies: list[dict]):
                     done_msg += "Stripe 门户里也显示没有发票记录（No invoice history）。"
                 if job.get("portal_billing_name"):
                     done_msg += f"门户账单姓名：{job['portal_billing_name']}。"
+                pb = job.get("portal_billing") or {}
+                if pb:
+                    parts = [pb.get("plan", ""), pb.get("amount_text", "")]
+                    if pb.get("next_payment"):
+                        parts.append(f"下一笔付款 {pb['next_payment']}")
+                    if pb.get("payment_method"):
+                        parts.append(f"付款方式 {pb['payment_method']}")
+                    done_msg += "门户订阅：" + "，".join(p for p in parts if p) + "。"
+                    if pb.get("invoice_history_empty") and pb.get("next_payment") in (
+                            "US$0.00", "$0.00"):
+                        done_msg += ("门户无发票记录：下一笔为 $0（全额折扣），"
+                                     "目前没有可下载的发票 PDF，这不是获取失败。")
                 update_job(job, status="completed", stage="done", progress=100,
                            message=done_msg)
             finally:
