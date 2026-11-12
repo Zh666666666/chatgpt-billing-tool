@@ -380,7 +380,7 @@ async def _in_page_portal_url(page):
         return None
 
 async def _download_invoice_pdfs(page, context, job, invoices, started):
-    """Click each Billing transaction row and download its invoice PDF.
+    """Click each transaction row and download its invoice PDF.
 
     Rows often carry NO word "Invoice" at all (just "Nov 12, 2026
     ChatGPT Plus  ₱982.14  Paid"), so they are matched by date +
@@ -395,7 +395,58 @@ async def _download_invoice_pdfs(page, context, job, invoices, started):
     """
     debug = {"rows_found": len(invoices), "rows_clicked": 0,
              "new_tabs": 0, "same_tab_navs": 0, "modals": 0, "pdfs": 0}
-    job["invoice_debug"] = debug
+    job.setdefault("invoice_debug", debug)
+
+    async def _detect_target(pages_before, url_before):
+        new_pages = [p for p in context.pages if p not in pages_before]
+        if new_pages:
+            target = new_pages[-1]
+            debug["new_tabs"] += 1
+            try:
+                await target.wait_for_load_state("domcontentloaded", timeout=20000)
+                await target.wait_for_timeout(2000)
+            except Exception:
+                pass
+            return target, "new_tab"
+        if page.url != url_before:
+            debug["same_tab_navs"] += 1
+            try:
+                await page.wait_for_timeout(2000)
+            except Exception:
+                pass
+            return page, "same_tab"
+        return None, None
+
+    async def _handle_target(target, inv, index):
+        stext = ""
+        try:
+            stext = await target.inner_text("body")
+        except Exception:
+            stext = ""
+        if "invoice.stripe.com" in target.url or "Invoice" in stext:
+            await _screenshot(target, job, f"invoice-page-{index+1}.png",
+                              "invoice page")
+            num_m = re.search(
+                r"Invoice\s*(?:number|#)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-]{4,})",
+                stext)
+            if num_m:
+                inv["invoice_number"] = num_m.group(1)
+            inv["source"] = "invoice.stripe.com"
+            pdf_name, _ = await _try_download_from_stripe_page(
+                target, job, inv, len(invoices))
+            if pdf_name:
+                inv["pdf_file"] = pdf_name
+                debug["pdfs"] += 1
+        try:
+            if target is page:
+                await page.go_back(wait_until="domcontentloaded",
+                                   timeout=15000)
+                await page.wait_for_timeout(2000)
+            else:
+                await target.close()
+        except Exception:
+            pass
+
     for index in range(min(len(invoices), 5)):
         if time.time() - started > TOTAL_TIMEOUT_S - 20:
             break
@@ -406,11 +457,11 @@ async def _download_invoice_pdfs(page, context, job, invoices, started):
         try:
             pages_before = set(context.pages)
             url_before = page.url
-            # Click the innermost element whose text is this row.
-            # Whitespace must be normalised on both sides: the stored
-            # row text is flattened by _parse_invoice_row_text, while
-            # the DOM text may hold double spaces / line breaks.
-            clicked_text = await page.evaluate("""(wanted) => {
+            # Attempt 1: click the row element itself. Whitespace is
+            # normalised on both sides: the stored row text is
+            # flattened by _parse_invoice_row_text, while the DOM text
+            # may hold double spaces / line breaks.
+            clicked = await page.evaluate("""(wanted) => {
               const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
               wanted = norm(wanted);
               const els = document.querySelectorAll(
@@ -428,60 +479,39 @@ async def _download_invoice_pdfs(page, context, job, invoices, started):
               }
               if (!best) return null;
               best.click();
-              return (best.innerText || '').trim().slice(0, 200);
+              return true;
             }""", row_text)
-            if not clicked_text:
+            if not clicked:
                 continue
             debug["rows_clicked"] += 1
             await page.wait_for_timeout(4000)
-            target = None
-            new_pages = [p for p in context.pages if p not in pages_before]
-            if new_pages:
-                # Case 1: invoice opened in a new tab.
-                target = new_pages[-1]
-                debug["new_tabs"] += 1
+            target, _kind = await _detect_target(pages_before, url_before)
+            if target is None:
+                # Attempt 2: the row itself may not be clickable; click
+                # its View / Download button, or the link wrapping it.
                 try:
-                    await target.wait_for_load_state("domcontentloaded", timeout=20000)
-                    await target.wait_for_timeout(2000)
-                except Exception:
-                    pass
-            elif page.url != url_before:
-                # Case 2: same-tab navigation to the invoice page.
-                target = page
-                debug["same_tab_navs"] += 1
-                try:
-                    await page.wait_for_timeout(2000)
+                    await page.evaluate("""(wanted) => {
+                      const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+                      wanted = norm(wanted);
+                      const els = document.querySelectorAll(
+                        'button, a, [role="button"], [role="row"], tr, li, div');
+                      for (const el of els) {
+                        if (norm(el.innerText) !== wanted) continue;
+                        const btn = [...el.querySelectorAll('button, a')].find(
+                          b => /View|Download|Invoice/i.test(b.innerText || ''));
+                        if (btn) { btn.click(); return true; }
+                        const link = el.closest('a, button');
+                        if (link && link !== el) { link.click(); return true; }
+                        return false;
+                      }
+                      return false;
+                    }""", row_text)
+                    await page.wait_for_timeout(4000)
+                    target, _kind = await _detect_target(pages_before, url_before)
                 except Exception:
                     pass
             if target is not None:
-                stext = ""
-                try:
-                    stext = await target.inner_text("body")
-                except Exception:
-                    stext = ""
-                if "invoice.stripe.com" in target.url or "Invoice" in stext:
-                    await _screenshot(target, job, f"invoice-page-{index+1}.png",
-                                      "invoice page")
-                    num_m = re.search(
-                        r"Invoice\s*(?:number|#)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-]{4,})",
-                        stext)
-                    if num_m:
-                        inv["invoice_number"] = num_m.group(1)
-                    inv["source"] = "invoice.stripe.com"
-                    pdf_name, _ = await _try_download_from_stripe_page(
-                        target, job, inv, len(invoices))
-                    if pdf_name:
-                        inv["pdf_file"] = pdf_name
-                        debug["pdfs"] += 1
-                try:
-                    if target is page:
-                        await page.go_back(wait_until="domcontentloaded",
-                                           timeout=15000)
-                        await page.wait_for_timeout(2000)
-                    else:
-                        await target.close()
-                except Exception:
-                    pass
+                await _handle_target(target, inv, index)
             else:
                 # Case 3: a modal/dialog on the same page.
                 try:
@@ -505,6 +535,123 @@ async def _download_invoice_pdfs(page, context, job, invoices, started):
         except Exception:
             continue
     return debug
+
+
+WORKSPACE_SETTINGS_URL = "https://chatgpt.com/#settings/Workspace"
+ADMIN_CONSOLE_URL = "https://chatgpt.com/admin"
+
+
+async def _collect_invoice_rows(page):
+    """Row texts on a billing/invoices page: elements mentioning View,
+    Download or Invoice together with an amount and a year. Works for
+    the personal Billing history and the workspace Invoices list."""
+    try:
+        return await page.evaluate("""() => {
+          const out = [];
+          const els = document.querySelectorAll(
+            'button, a, [role="button"], [role="row"], tr, li, div');
+          for (const el of els) {
+            const t = (el.innerText || '').trim();
+            if (!t || t.length > 300) continue;
+            if (/View|Download|Invoice|Paid/i.test(t)
+                && /(US\\$|\\$|€|£|₱|¥)/.test(t) && /\\d{4}/.test(t)) {
+              out.push(t);
+            }
+          }
+          return [...new Set(out)].slice(0, 20);
+        }""")
+    except Exception:
+        return []
+
+
+async def _parse_workspace_page(page, context, job, invoices, started):
+    """The workspace Billing page is already loaded in `page`.
+    Screenshot it, read its subscription summary, collect its
+    invoice rows and download their PDFs. Returns True when the
+    page actually shows workspace billing content."""
+    await _screenshot(page, job, "workspace-billing.png", "workspace billing")
+    try:
+        text = await page.inner_text("body")
+    except Exception:
+        text = ""
+    low = (text or "").lower()
+    if "billing" not in low and "invoice" not in low and "subscription" not in low:
+        return False
+    ws: dict = {}
+    sub = _extract_subscription(text)
+    if sub:
+        ws["subscription"] = sub
+    pb = _parse_portal_billing(text)
+    if pb:
+        ws["portal_billing"] = pb
+        if not job.get("portal_billing") or not job["portal_billing"].get("plan"):
+            job["portal_billing"] = pb
+    job["workspace_billing"] = ws
+    row_texts = await _collect_invoice_rows(page)
+    before = len(invoices)
+    for rt in row_texts:
+        invoices.append(_parse_invoice_row_text(rt))
+    if len(invoices) > before:
+        dbg = await _download_invoice_pdfs(
+            page, context, job, invoices[before:], started)
+        job["workspace_invoice_debug"] = dbg
+    return True
+
+
+async def _fetch_workspace_billing(page, context, job, invoices, started):
+    """Try the Business workspace billing routes, in order:
+    the Workspace Admin Console (chatgpt.com/admin), then the
+    in-app Workspace settings page. Only the workspace owner can
+    see invoices there; admins see the plan but not the invoices.
+    Returns True when a workspace billing page was reached.
+    Per OpenAI's help pages, Workspace settings > Billing is where
+    Business invoices live; for some workspaces selecting Workspace
+    settings opens the Admin Console instead, hence both routes.
+    """
+    job.setdefault("page_debug", {})
+    for label, url in (("admin_console", ADMIN_CONSOLE_URL),
+                       ("workspace_settings", WORKSPACE_SETTINGS_URL)):
+        try:
+            await page.goto(url, wait_until="domcontentloaded",
+                            timeout=NAV_TIMEOUT_MS)
+            await page.wait_for_timeout(5000)
+            try:
+                text = await page.inner_text("body")
+            except Exception:
+                text = ""
+            sig = _body_signals(text, await page.title(), page.url)
+            if sig["is_challenge"]:
+                job["page_debug"]["workspace_billing"] = "challenge"
+                if not await _wait_for_challenge_to_clear(page, timeout_s=45):
+                    continue
+                try:
+                    text = await page.inner_text("body")
+                except Exception:
+                    text = ""
+            if sig["looks_login"]:
+                job["page_debug"]["workspace_billing"] = "login_required"
+                return False
+            low = (text or "").lower()
+            if "billing" not in low and "invoice" not in low:
+                job["page_debug"]["workspace_billing"] = f"no_billing_on_{label}"
+                continue
+            # Open the Billing section if this page only lists it.
+            if not _has_billing_content(text):
+                try:
+                    nav = page.get_by_text("Billing", exact=True).first
+                    if await nav.count():
+                        await nav.click(timeout=5000)
+                        await page.wait_for_timeout(4000)
+                except Exception:
+                    pass
+            if await _parse_workspace_page(page, context, job, invoices, started):
+                job["page_debug"]["workspace_billing"] = f"found_via_{label}"
+                return True
+        except Exception:
+            continue
+    if "workspace_billing" not in job["page_debug"]:
+        job["page_debug"]["workspace_billing"] = "not_found"
+    return False
 
 
 async def run_job(job: dict, cookies: list[dict]):
@@ -710,6 +857,16 @@ async def run_job(job: dict, cookies: list[dict]):
                            message="正在打开发票并下载原始 PDF…")
                 await _download_invoice_pdfs(page, context, job, invoices, started)
 
+                # --- Workspace billing (Business) ---
+                # The personal Billing page has no invoices for a
+                # Business workspace: its invoices live under
+                # Workspace settings > Billing, visible to the owner
+                # only. Try that route when no PDF came back yet.
+                if not any(inv.get("pdf_file") for inv in invoices):
+                    update_job(job, stage="opening_workspace_billing", progress=75,
+                               message="正在尝试工作空间账单（Workspace settings → Billing）…")
+                    await _fetch_workspace_billing(page, context, job, invoices, started)
+
                 # --- Fallback: Subscription page + Stripe portal ---
                 if not invoices:
                     update_job(job, stage="opening_subscription", progress=80,
@@ -901,25 +1058,33 @@ async def run_job(job: dict, cookies: list[dict]):
                 dbg = job.get("page_debug") or {}
                 if not deduped and not dbg.get("billing_panel_loaded", True):
                     if not dbg.get("sidebar_has_billing", True):
-                        done_msg += ("账单页没有加载出来：截图里是 General 设置页，"
+                        done_msg += ("个人 Billing 面板没有加载出来：截图里是 General 设置页，"
                                      "且设置侧栏里没有 Billing/Subscription 入口。"
-                                     "当前 session 对应的身份可能没有账单权限"
-                                     "（例如团队工作空间的成员身份，账单在管理员名下）。"
-                                     "请换成实际付费的账号（或工作空间管理员账号）的 session 再试。")
+                                     "Business 工作空间的账单不在这里，"
+                                     "在工作空间账单路径里（见工作空间账单结果）。")
                     else:
                         done_msg += "账单页没有加载出来（截图里不是 Billing 面板），请重试一次。"
+                ws_dbg = dbg.get("workspace_billing")
+                if ws_dbg and ws_dbg.startswith("found_via"):
+                    wsb = job.get("workspace_billing") or {}
+                    if not deduped:
+                        done_msg += "工作空间账单页已打开，但没有找到可下载的发票记录。"
+                    if wsb.get("portal_billing", {}).get("next_payment") in (
+                            "US$0.00", "$0.00"):
+                        done_msg += "下一笔为 $0（全额折扣），本期没有可下载的发票。"
                 if dbg.get("portal_empty"):
                     done_msg += "Stripe 门户里也显示没有发票记录（No invoice history）。"
                 if job.get("portal_billing_name"):
                     done_msg += f"门户账单姓名：{job['portal_billing_name']}。"
                 pb = job.get("portal_billing") or {}
                 if pb:
-                    parts = [pb.get("plan", ""), pb.get("amount_text", "")]
-                    if pb.get("next_payment"):
-                        parts.append(f"下一笔付款 {pb['next_payment']}")
-                    if pb.get("payment_method"):
-                        parts.append(f"付款方式 {pb['payment_method']}")
-                    done_msg += "门户订阅：" + "，".join(p for p in parts if p) + "。"
+                    parts = [p for p in [
+                        pb.get("plan", ""), pb.get("amount_text", ""),
+                        (f"下一笔付款 {pb['next_payment']}" if pb.get("next_payment") else ""),
+                        (f"付款方式 {pb['payment_method']}" if pb.get("payment_method") else ""),
+                    ] if p]
+                    if parts:
+                        done_msg += "门户订阅：" + "，".join(parts) + "。"
                     if pb.get("invoice_history_empty") and pb.get("next_payment") in (
                             "US$0.00", "$0.00"):
                         done_msg += ("门户无发票记录：下一笔为 $0（全额折扣），"

@@ -72,12 +72,12 @@ code{background:#eee;padding:1px 5px;border-radius:5px;font-size:13px}
 2）<b>浏览器人机验证</b>：遇到 Cloudflare / Turnstile，本工具不自动解验证，请稍后重试。<br>
 3）<b>HTTP 403</b>：服务端拒绝了本次访问。有效 session 不等于服务端一定放行。<br>
 4）<b>Apple / Google Play 订阅</b>：发票不在 Stripe，由苹果/谷歌开具，本页会如实说明，不会凭空生成 PDF。<br>
-5）<b>Business 工作空间</b>：账单在 Stripe 门户里（订阅、付款方式、发票记录）。如果下一笔付款为 US$0.00（全额折扣），门户没有发票记录是正常的。<br>
+5）<b>Business 工作空间</b>：账单在 Workspace settings → Billing → Invoices（只有所有者能看到发票），本工具在个人账单没有结果时会自动走这条路（或 Admin Console → Billing）。如果下一笔付款为 US$0.00（全额折扣），没有发票记录是正常的。<br>
 6）本工具不保证一定成功；失败时会明确写出失败阶段，不会只给一个入口链接。</p></details></div>
 </main>
 <script>
 const $=s=>document.querySelector(s);
-const STAGES=[["received","已收到"],["launching_browser","启动浏览器"],["opening_chatgpt","打开 ChatGPT"],["checking_login","检查登录状态"],["opening_billing","打开 Billing"],["listing_invoices","读取交易记录"],["downloading_invoices","下载发票 PDF"],["opening_subscription","尝试 Subscription / Stripe 门户"],["resolving_stripe_portal","从浏览器内解析 Stripe 门户"],["done","完成"]];
+const STAGES=[["received","已收到"],["launching_browser","启动浏览器"],["opening_chatgpt","打开 ChatGPT"],["checking_login","检查登录状态"],["opening_billing","打开 Billing"],["listing_invoices","读取交易记录"],["downloading_invoices","下载发票 PDF"],["opening_workspace_billing","打开工作空间账单"],["opening_subscription","尝试 Subscription / Stripe 门户"],["resolving_stripe_portal","从浏览器内解析 Stripe 门户"],["done","完成"]];
 let job=null, timer=null, fileToken="";
 function stageLabel(s){const f=STAGES.find(x=>x[0]===s);return f?f[1]:s}
 function renderSteps(cur){

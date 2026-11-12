@@ -70,5 +70,9 @@ cloudflared tunnel --url http://127.0.0.1:8000
 - 同一 IP 上 Playwright Firefox（配 Firefox UA）打开首页 → **200**，是真实首页。
 
 所以不是 IP 被硬封，而是 **Cloudflare 识别出了无头 Chromium**。修复方法是改用 Firefox（`app/browser_runner.py` 已改，`Dockerfile` 已装 Firefox）。如果将来 Firefox 也被识别，下一招是带虚拟显示器的有头模式（Xvfb），而不是继续换 IP。
+
+## 工作空间账单路径（Business，2026-11-12）
+
+个人 Billing 页（Settings → Billing → Transaction history）对 Business 工作空间没有发票：工作空间的发票在 **Workspace settings → Billing → Invoices**，只有所有者能看到；管理员只能看套餐、看不到发票（OpenAI Help Center《Managing billing for ChatGPT and the API platform》《Managing billing and seats in ChatGPT Business》）。有些工作空间点 Workspace settings 会自动跳到 Admin Console（`chatgpt.com/admin` → 选工作空间 → Billing），所以工具按顺序试两条路：先 Admin Console，再 `#settings/Workspace`。个人账单没有下载到 PDF 时才走这条路；抓到的订阅信息会并进"工作空间账单（Stripe 门户）"卡片。注意：工具用 session 打开的 Stripe 门户是**个人账号**的客户门户（空），不是工作空间的——不要把门户为空当成"工作空间没有账单"。
 | `browser_error` | 服务器 Chromium 启动失败，检查内存 / 镜像 |
 | 账单为空但截图正常 | 可能是 Apple / Google Play 订阅（发票在应用商店），或页面结构变了；以截图为准，不要凭空补数据 |

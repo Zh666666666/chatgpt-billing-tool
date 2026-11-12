@@ -238,5 +238,93 @@ class TestBillingPanelDetection(unittest.TestCase):
         asyncio.run(run())
 
 
+class TestWorkspaceBillingPage(unittest.TestCase):
+    def test_workspace_invoices_row_download(self):
+        """The Business workspace invoices live under Workspace
+        settings > Billing > Invoices, not on the personal Billing
+        page. The fake workspace page has one invoice row whose
+        clickable element is a nested View button (the row div
+        itself does nothing), plus the subscription summary the
+        portal parser reads. _parse_workspace_page must collect the
+        row, click through the View button, and download the PDF."""
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        invoice_html = (
+            "<h1>Invoice number INV-WS-0007</h1>"
+            "<p>ChatGPT Business Subscription (per seat)</p>"
+            "<button id=\"dl\">Download invoice</button>"
+            "<script>document.getElementById('dl').onclick = () => {"
+            "const blob = new Blob(['%PDF-1.7 fake-invoice'],"
+            "{type: 'application/pdf'});"
+            "const a = document.createElement('a');"
+            "a.href = URL.createObjectURL(blob);"
+            "a.download = 'Invoice-INV-WS-0007.pdf'; a.click();};</script>"
+        )
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = invoice_html.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        ws_html = (
+            "<h1>Billing</h1>"
+            "<p>Subscription ChatGPT Business Subscription US$25.00 /month "
+            "Next payment Nov 29, 2026 US$0.00 "
+            "Payment method Mastercard \u2022\u2022\u2022\u2022 4675</p>"
+            "<h2>Invoices</h2>"
+            f"<div role=\"row\">Oct 29, 2026 ChatGPT Business US$25.00 Paid "
+            f"<button onclick=\"location.href='http://127.0.0.1:{port}/invoice'\">"
+            "View</button></div>"
+        )
+
+        async def run():
+            from playwright.async_api import async_playwright
+            from app.browser_runner import _parse_workspace_page
+            async with async_playwright() as pw:
+                b = await pw.firefox.launch(headless=True)
+                ctx = await b.new_context()
+                page = await ctx.new_page()
+                await page.set_content(ws_html)
+                job = new_job("session_cookie")
+                try:
+                    invoices = []
+                    ok = await _parse_workspace_page(
+                        page, ctx, job, invoices, time.time())
+                    self.assertTrue(ok)
+                    pb = (job.get("workspace_billing") or {}).get(
+                        "portal_billing") or {}
+                    self.assertIn("Business", pb.get("plan", ""))
+                    self.assertEqual(pb.get("next_payment"), "US$0.00")
+                    self.assertEqual(len(invoices), 1)
+                    dbg = job.get("workspace_invoice_debug") or {}
+                    self.assertEqual(dbg.get("rows_clicked"), 1)
+                    self.assertEqual(dbg.get("same_tab_navs"), 1)
+                    self.assertEqual(dbg.get("pdfs"), 1)
+                    self.assertEqual(invoices[0].get("invoice_number"),
+                                     "INV-WS-0007")
+                    self.assertIsNotNone(invoices[0].get("pdf_file"))
+                    return dbg
+                finally:
+                    delete_job(job["job_id"])
+                    await b.close()
+        try:
+            asyncio.run(run())
+        finally:
+            server.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()
