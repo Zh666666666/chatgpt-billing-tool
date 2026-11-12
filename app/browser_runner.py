@@ -289,7 +289,7 @@ async def run_job(job: dict, cookies: list[dict]):
                     viewport={"width": 1280, "height": 900},
                     user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                "Chrome/126.0.0.0 Safari/537.36"),
+                                "Chrome/131.0.0.0 Safari/537.36"),
                     locale="en-US",
                     timezone_id="America/Los_Angeles",
                 )
@@ -314,10 +314,29 @@ async def run_job(job: dict, cookies: list[dict]):
                     return
                 await page.wait_for_timeout(4000)
                 if http_status == 403:
+                    # A 403 from a shared datacenter IP is often
+                    # flaky / rate-based, so retry the first load
+                    # once after a short wait. This is not a bypass:
+                    # it is the same normal navigation, once more.
+                    # If the second load is still 403 (or a challenge
+                    # page), the job fails honestly below.
+                    update_job(job, stage="opening_chatgpt", progress=22,
+                               message="首次访问被拒绝（403），10 秒后重试一次…")
+                    await page.wait_for_timeout(10000)
+                    try:
+                        resp2 = await page.goto(CHATGPT_HOME, wait_until="domcontentloaded",
+                                                timeout=NAV_TIMEOUT_MS)
+                        http_status = resp2.status if resp2 else http_status
+                        await page.wait_for_timeout(4000)
+                    except Exception:
+                        pass
+                if http_status == 403:
                     fail_job(job, stage="opening_chatgpt", code="access_denied_403",
                              message="chatgpt.com 返回 HTTP 403（访问被拒绝）",
-                             hint="服务端判定本次访问不被允许。有效 session 不等于服务端一定放行，"
-                                  "请稍后重试，或换一个网络环境再试。本工具不绕过访问控制。",
+                             hint="服务端两次判定本次访问不被允许。有效 session 不等于服务端一定放行："
+                                  "Render 免费版用的是共享机房 IP，常被直接拒绝。请隔一段时间再试一次；"
+                                  "如果反复 403，说明这个出口 IP 段不被接受，需要换托管地区/平台，"
+                                  "或改在你自己的电脑上跑（自己的网络 IP）。本工具不绕过访问控制。",
                              http_status=403, url=page.url, page_title=await page.title())
                     return
 

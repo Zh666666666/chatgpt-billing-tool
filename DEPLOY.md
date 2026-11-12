@@ -59,6 +59,6 @@ cloudflared tunnel --url http://127.0.0.1:8000
 |---|---|
 | `login_required` | session 过期 / 缺分段 / 不被接受，页面跳回登录页 |
 | `bot_check` | 遇到 Cloudflare / Turnstile 人机验证，不自动解 |
-| `access_denied_403` | chatgpt.com 返回 403，服务端拒绝本次访问 |
+| `access_denied_403` | chatgpt.com 返回 403，服务端拒绝本次访问（首次打开即 403 时会自动重试一次；仍 403 则如实失败） |
 | `browser_error` | 服务器 Chromium 启动失败，检查内存 / 镜像 |
 | 账单为空但截图正常 | 可能是 Apple / Google Play 订阅（发票在应用商店），或页面结构变了；以截图为准，不要凭空补数据 |
