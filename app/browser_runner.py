@@ -30,6 +30,7 @@ stay null; nothing is invented to fill a table.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -136,6 +137,41 @@ async def _wait_for_challenge_to_clear(page, timeout_s: int = 45) -> bool:
         if not sig["is_challenge"]:
             return True
         await asyncio.sleep(2)
+    return False
+
+async def _check_page(page, job, stage, target_url=None):
+    """Observe every navigation; retry its target once after natural clearance."""
+    started = time.monotonic()
+    record = {"stage": stage, "challenge": False, "wait_seconds": 0}
+    job.setdefault("page_debug", {}).setdefault("stages", []).append(record)
+    for attempt in range(2):
+        text = await page.inner_text("body")
+        sig = _body_signals(text, await page.title(), page.url)
+        if sig["is_challenge"]:
+            record["challenge"] = True
+            update_job(job, stage=stage, message=f"{stage}：等待人机验证自行通过…")
+            cleared = await _wait_for_challenge_to_clear(page, timeout_s=45)
+            record["wait_seconds"] = round(time.monotonic() - started, 1)
+            if not cleared:
+                record["outcome"] = "bot_check"
+                await _screenshot(page, job, stage + ".png", "challenge")
+                fail_job(job, stage=stage, code="bot_check",
+                         message=f"{stage}：人机验证未通过，已等待 {record['wait_seconds']} 秒。查询未完成。",
+                         hint="请在正常浏览器中完成验证后重试；工具不会自动解验证。")
+                return False
+            if target_url and attempt == 0:
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                await page.wait_for_timeout(2000)
+                continue
+            text = await page.inner_text("body")
+            sig = _body_signals(text, await page.title(), page.url)
+        if sig["looks_login"] or sig["is_challenge"]:
+            code = "bot_check" if sig["is_challenge"] else "login_required"
+            record["outcome"] = code
+            fail_job(job, stage=stage, code=code, message=f"{stage}：{code}，查询未完成。")
+            return False
+        record["outcome"] = "ready"
+        return True
     return False
 
 def _extract_subscription(text: str) -> dict | None:
@@ -581,6 +617,7 @@ async def _parse_workspace_page(page, context, job, invoices, started):
     sub = _extract_subscription(text)
     if sub:
         ws["subscription"] = sub
+        job["subscription"] = sub
     pb = _parse_portal_billing(text)
     if pb:
         ws["portal_billing"] = pb
@@ -620,17 +657,11 @@ async def _fetch_workspace_billing(page, context, job, invoices, started):
             except Exception:
                 text = ""
             sig = _body_signals(text, await page.title(), page.url)
-            if sig["is_challenge"]:
-                job["page_debug"]["workspace_billing"] = "challenge"
-                if not await _wait_for_challenge_to_clear(page, timeout_s=45):
-                    continue
-                try:
-                    text = await page.inner_text("body")
-                except Exception:
-                    text = ""
-            if sig["looks_login"]:
-                job["page_debug"]["workspace_billing"] = "login_required"
+            await _screenshot(page, job, label + ".png", "workspace route")
+            if not await _check_page(page, job, label, url):
+                job["page_debug"]["workspace_billing"] = job["error"]["code"]
                 return False
+            text = await page.inner_text("body")
             low = (text or "").lower()
             if "billing" not in low and "invoice" not in low:
                 job["page_debug"]["workspace_billing"] = f"no_billing_on_{label}"
@@ -644,10 +675,14 @@ async def _fetch_workspace_billing(page, context, job, invoices, started):
                         await page.wait_for_timeout(4000)
                 except Exception:
                     pass
+            if not await _check_page(page, job, label + "_billing"):
+                return False
             if await _parse_workspace_page(page, context, job, invoices, started):
                 job["page_debug"]["workspace_billing"] = f"found_via_{label}"
                 return True
-        except Exception:
+        except Exception as exc:
+            job["page_debug"]["workspace_billing"] = f"{label}:{type(exc).__name__}"
+            await _screenshot(page, job, label + ".png", "workspace route")
             continue
     if "workspace_billing" not in job["page_debug"]:
         job["page_debug"]["workspace_billing"] = "not_found"
@@ -813,6 +848,9 @@ async def run_job(job: dict, cookies: list[dict]):
                             billing_text = await _read_body()
                         except Exception:
                             pass
+                if not await _check_page(page, job, "billing_final", BILLING_URL):
+                    return
+                billing_text = await _read_body()
                 job["page_debug"]["billing_panel_loaded"] = _has_billing_content(billing_text)
                 job["page_debug"]["sidebar_has_billing"] = _sidebar_has_billing(billing_text)
 
@@ -866,9 +904,11 @@ async def run_job(job: dict, cookies: list[dict]):
                     update_job(job, stage="opening_workspace_billing", progress=75,
                                message="正在尝试工作空间账单（Workspace settings → Billing）…")
                     await _fetch_workspace_billing(page, context, job, invoices, started)
+                    if job.get("status") == "failed":
+                        return
 
                 # --- Fallback: Subscription page + Stripe portal ---
-                if not invoices:
+                if not invoices and not job.get("workspace_billing"):
                     update_job(job, stage="opening_subscription", progress=80,
                                message="Billing 未找到账单，正在尝试 Subscription / Stripe 门户…")
                     try:
@@ -881,13 +921,9 @@ async def run_job(job: dict, cookies: list[dict]):
                         except Exception:
                             sub_text = ""
                         sig_sub = _body_signals(sub_text, await page.title(), page.url)
-                        if sig_sub["is_challenge"]:
-                            job.setdefault("page_debug", {})["subscription_challenge"] = True
-                            if await _wait_for_challenge_to_clear(page, timeout_s=45):
-                                try:
-                                    sub_text = await page.inner_text("body")
-                                except Exception:
-                                    sub_text = ""
+                        if not await _check_page(page, job, "subscription", SUBSCRIPTION_URL):
+                            return
+                        sub_text = await page.inner_text("body")
                         await _screenshot(page, job, "subscription.png", "subscription")
                         if not subscription:
                             job["subscription"] = _extract_subscription(sub_text)
@@ -1058,7 +1094,7 @@ async def run_job(job: dict, cookies: list[dict]):
                 dbg = job.get("page_debug") or {}
                 if not deduped and not dbg.get("billing_panel_loaded", True):
                     if not dbg.get("sidebar_has_billing", True):
-                        done_msg += ("个人 Billing 面板没有加载出来：截图里是 General 设置页，"
+                        done_msg += ("个人 Billing 面板没有加载出来：未识别到 Billing 内容，"
                                      "且设置侧栏里没有 Billing/Subscription 入口。"
                                      "Business 工作空间的账单不在这里，"
                                      "在工作空间账单路径里（见工作空间账单结果）。")
@@ -1071,7 +1107,7 @@ async def run_job(job: dict, cookies: list[dict]):
                         done_msg += "工作空间账单页已打开，但没有找到可下载的发票记录。"
                     if wsb.get("portal_billing", {}).get("next_payment") in (
                             "US$0.00", "$0.00"):
-                        done_msg += "下一笔为 $0（全额折扣），本期没有可下载的发票。"
+                        done_msg += "下一笔付款为 $0；是否有历史发票以发票列表为准。"
                 if dbg.get("portal_empty"):
                     done_msg += "Stripe 门户里也显示没有发票记录（No invoice history）。"
                 if job.get("portal_billing_name"):
@@ -1089,6 +1125,10 @@ async def run_job(job: dict, cookies: list[dict]):
                             "US$0.00", "$0.00"):
                         done_msg += ("门户无发票记录：下一笔为 $0（全额折扣），"
                                      "目前没有可下载的发票 PDF，这不是获取失败。")
+                if dbg.get("workspace_billing") and not str(dbg["workspace_billing"]).startswith("found_via"):
+                    fail_job(job, stage="opening_workspace_billing", code="workspace_billing_unavailable",
+                             message="工作空间账单查询未完成：" + str(dbg["workspace_billing"]) + "。个人门户结果不能证明工作空间没有账单。")
+                    return
                 update_job(job, status="completed", stage="done", progress=100,
                            message=done_msg)
             finally:
@@ -1101,4 +1141,9 @@ async def run_job(job: dict, cookies: list[dict]):
     finally:
         # The caller drops the in-memory cookie reference; nothing
         # credential-like was written to disk by this runner.
-        pass
+        diagnostics = {"page_debug": job.get("page_debug", {}), "log": job.get("log", [])}
+        try:
+            save_file(job, "diagnostics.json", json.dumps(diagnostics, ensure_ascii=False).encode(),
+                      "diagnostics", "application/json")
+        except FileNotFoundError:
+            pass  # The job may have expired or been deleted while running.

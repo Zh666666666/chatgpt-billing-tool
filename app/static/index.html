@@ -98,6 +98,8 @@ async function poll(){
     const e=j.error||{};
     $("#errText").textContent=`失败阶段：${stageLabel(e.stage||j.stage)}\n原因：${e.message||j.message}\n${e.hint?"建议："+e.hint:""}${e.http_status?"\nHTTP 状态："+e.http_status:""}${e.url?"\n当时页面："+e.url:""}`;
     $("#errBox").classList.remove("hidden");
+    $("#result").classList.remove("hidden");
+    $("#subBody").textContent="查询未完成，请查看失败阶段与诊断文件。";
     if(j.files&&j.files.length) renderShots(j);
     return;
   }
@@ -106,11 +108,11 @@ async function poll(){
     $("#result").classList.remove("hidden");
     const s=j.subscription;
     $("#subBody").innerHTML=s?Object.entries(s).filter(([k])=>k!=="source_text_excerpt").map(([k,v])=>`<div><b>${esc(k)}</b>：${esc(v)}</div>`).join("")+`<p class="note">来源页面原文摘录：${esc(s.source_text_excerpt||"")}</p>`:`<p>本次在页面上没有识别到可确认的订阅字段（例如套餐、续费时间）。请查看下方截图核对；未找到的字段不会凭空填写。</p><p class="note">计费平台：${esc(j.billing_platform||"未知")}</p>`;
-    const pb=j.portal_billing;
+    const pb=j.workspace_billing?.portal_billing||j.portal_billing;
     if(pb){
       $("#portalCard").classList.remove("hidden");
       $("#portalBody").innerHTML=Object.entries(pb).filter(([k])=>k!=="source_text_excerpt").map(([k,v])=>`<div><b>${esc(k)}</b>：${esc(v)}</div>`).join("")+`<p class="note">来源页面原文摘录：${esc(pb.source_text_excerpt||"")}</p>`;
-      if(pb.invoice_history_empty&&pb.next_payment==="US$0.00"){$("#portalBody").innerHTML+=`<p class="note">门户显示没有发票记录，且下一笔付款为 US$0.00（全额折扣）：这种订阅目前没有可下载的发票 PDF，这不是获取失败。上面这份门户订阅信息就是当前的工作空间账单。</p>`}
+      if(pb.invoice_history_empty&&pb.next_payment==="US$0.00"){$("#portalBody").innerHTML+=`<p class="note">门户显示没有发票记录，且下一笔付款为 US$0.00（全额折扣）：这种订阅目前没有可下载的发票 PDF，这不是获取失败。个人门户不能作为工作空间账单的证据。</p>`}
     } else {$("#portalCard").classList.add("hidden")}
     renderShots(j); renderInvoices(j);
   }
@@ -118,6 +120,9 @@ async function poll(){
 function renderShots(j){
   const shots=j.files.filter(f=>f.kind==="screenshot");
   $("#shots").innerHTML=shots.length?shots.map(f=>`<p><b>${esc(f.name)}</b> (${Math.round(f.size/1024)} KB)</p><img class="shot" src="${fileUrl(f.name,0)}" alt="${esc(f.name)}"><div class="row"><a class="btn" href="${fileUrl(f.name,1)}">下载图片</a><a class="btn2" href="${fileUrl(f.name,0)}" target="_blank" rel="noopener">新窗口打开</a></div>`).join(""):"<p>本次没有生成截图。</p>";
+  const diagnostic=j.files.find(f=>f.name==="diagnostics.json");
+  if(diagnostic) $("#shots").innerHTML+=`<p><a class="btn2" href="${fileUrl(diagnostic.name,1)}">下载查询诊断</a></p>`;
+
 }
 function renderInvoices(j){
   const invs=j.invoices||[];
