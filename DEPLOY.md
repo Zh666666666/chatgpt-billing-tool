@@ -14,7 +14,7 @@
 
 1. 把本仓库推到 GitHub（公开或私有均可）。
 2. Render → New → Blueprint → 选择该仓库，`render.yaml` 已写好 Docker 部署。
-3. 选 Standard 套餐（约 $7/月起；Free 套餐会休眠，浏览器冷启动很慢，不推荐实测）。
+3. 计划：`render.yaml` 现在写的是 **free（免费）**，按用户 2026-11-12 的选择。免费版 15 分钟无访问就休眠，冷启动浏览器可能要 1–2 分钟，内存小、偶尔可能启动失败；如需更快更稳，可再改回 Standard（约 $7/月起）。
 4. 部署完成后打开 Render 给的 `https://xxx.onrender.com`，即为手机可用网址。
 5. 健康检查：`https://xxx.onrender.com/api/health` 应返回 `{"ok": true}`。
 
