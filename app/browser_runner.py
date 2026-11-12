@@ -97,6 +97,47 @@ def _body_signals(page_text: str, title: str, url: str):
         "has_settings_text": ("settings" in t and ("billing" in t or "subscription" in t)),
     }
 
+
+def _has_billing_content(page_text: str) -> bool:
+    """True when the Settings panel actually shows Billing, not the
+    General panel. The Billing panel always carries 'Transaction
+    history' or a 'Current plan' line; the General panel has neither.
+    A hash navigation that lands on General must not be mistaken for
+    a Billing page with zero invoices."""
+    t = (page_text or "").lower()
+    return ("transaction history" in t or "current plan" in t
+            or ("billing" in t and "subscription" in t))
+
+
+def _sidebar_has_billing(page_text: str) -> bool:
+    """True when the Settings sidebar lists a Billing/Subscription
+    entry at all. A workspace member account often has neither --
+    billing belongs to the workspace admin -- and then no navigation
+    can open a Billing panel for this identity."""
+    t = (page_text or "").lower()
+    return "billing" in t or "subscription" in t
+
+
+async def _wait_for_challenge_to_clear(page, timeout_s: int = 45) -> bool:
+    """Wait for a Cloudflare/Turnstile challenge page to clear on its
+    own in a real browser. We never click the checkbox, never solve
+    a CAPTCHA and never replay a proof-of-work token; we only wait
+    for the page to proceed, the way a normal page load waits. Returns
+    True when the challenge is gone, False on timeout."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            text = await page.inner_text("body")
+            title = await page.title()
+        except Exception:
+            await asyncio.sleep(2)
+            continue
+        sig = _body_signals(text, title, page.url)
+        if not sig["is_challenge"]:
+            return True
+        await asyncio.sleep(2)
+    return False
+
 def _extract_subscription(text: str) -> dict | None:
     """Best-effort extraction from visible settings text. Returns None
     if nothing recognisable is found; never fabricates a plan."""
@@ -503,30 +544,70 @@ async def run_job(job: dict, cookies: list[dict]):
                     return
 
                 # --- Billing page (current Oct 2026 path) ---
+                # A hash-only navigation is unreliable: the app may boot
+                # to the General panel and ignore the hash, so confirm
+                # the Billing panel actually rendered before reading it.
+                job.setdefault("page_debug", {})
                 update_job(job, stage="opening_billing", progress=35,
                            message="正在打开 Settings → Billing…")
                 await page.goto(BILLING_URL, wait_until="domcontentloaded",
                                 timeout=NAV_TIMEOUT_MS)
                 await page.wait_for_timeout(5000)
-                billing_text = ""
-                try:
-                    billing_text = await page.inner_text("body")
-                except Exception:
-                    billing_text = ""
+
+                async def _read_body():
+                    try:
+                        return await page.inner_text("body")
+                    except Exception:
+                        return ""
+
+                billing_text = await _read_body()
                 sig2 = _body_signals(billing_text, await page.title(), page.url)
                 if sig2["is_challenge"]:
-                    await _screenshot(page, job, "challenge.png", "challenge")
-                    fail_job(job, stage="bot_check", code="bot_check_detected",
-                             message="在 Billing 页面遇到浏览器人机验证",
-                             hint="本工具不自动解验证。请稍后重试。",
-                             url=page.url, page_title=await page.title())
-                    return
+                    # Wait for the challenge to clear on its own (a real
+                    # browser usually proceeds after a few seconds); we
+                    # never click it or solve it.
+                    update_job(job, stage="opening_billing", progress=36,
+                               message="遇到人机验证，正在等待页面自行通过…")
+                    if await _wait_for_challenge_to_clear(page, timeout_s=45):
+                        billing_text = await _read_body()
+                        sig2 = _body_signals(billing_text, await page.title(), page.url)
+                    else:
+                        await _screenshot(page, job, "challenge.png", "challenge")
+                        fail_job(job, stage="bot_check", code="bot_check_detected",
+                                 message="在 Billing 页面遇到浏览器人机验证",
+                                 hint="验证在 45 秒内没有自行通过。本工具不自动解验证。"
+                                      "请稍后重试，或换一个网络环境再试。",
+                                 url=page.url, page_title=await page.title())
+                        return
                 if sig2["looks_login"]:
                     fail_job(job, stage="checking_login", code="login_required",
                              message="Session 未登录：Billing 页面跳转到了登录页",
                              hint="请重新复制完整的 session cookie（含全部 .0/.1 分段）。",
                              url=page.url, page_title=await page.title())
                     return
+                if not _has_billing_content(billing_text):
+                    # The hash navigation landed on General (or another
+                    # panel). Try the sidebar entry, then a fresh load.
+                    job["page_debug"]["billing_panel_loaded"] = False
+                    job["page_debug"]["sidebar_has_billing"] = _sidebar_has_billing(billing_text)
+                    try:
+                        sidebar_billing = page.get_by_text("Billing", exact=True).first
+                        if await sidebar_billing.count():
+                            await sidebar_billing.click(timeout=5000)
+                            await page.wait_for_timeout(4000)
+                            billing_text = await _read_body()
+                    except Exception:
+                        pass
+                    if not _has_billing_content(billing_text):
+                        try:
+                            await page.goto(BILLING_URL, wait_until="domcontentloaded",
+                                            timeout=NAV_TIMEOUT_MS)
+                            await page.wait_for_timeout(8000)
+                            billing_text = await _read_body()
+                        except Exception:
+                            pass
+                job["page_debug"]["billing_panel_loaded"] = _has_billing_content(billing_text)
+                job["page_debug"]["sidebar_has_billing"] = _sidebar_has_billing(billing_text)
 
                 await _screenshot(page, job, "billing.png", "billing")
                 subscription = _extract_subscription(billing_text)
@@ -577,12 +658,20 @@ async def run_job(job: dict, cookies: list[dict]):
                         await page.goto(SUBSCRIPTION_URL, wait_until="domcontentloaded",
                                         timeout=NAV_TIMEOUT_MS)
                         await page.wait_for_timeout(4000)
-                        await _screenshot(page, job, "subscription.png", "subscription")
                         sub_text = ""
                         try:
                             sub_text = await page.inner_text("body")
                         except Exception:
                             sub_text = ""
+                        sig_sub = _body_signals(sub_text, await page.title(), page.url)
+                        if sig_sub["is_challenge"]:
+                            job.setdefault("page_debug", {})["subscription_challenge"] = True
+                            if await _wait_for_challenge_to_clear(page, timeout_s=45):
+                                try:
+                                    sub_text = await page.inner_text("body")
+                                except Exception:
+                                    sub_text = ""
+                        await _screenshot(page, job, "subscription.png", "subscription")
                         if not subscription:
                             job["subscription"] = _extract_subscription(sub_text)
                         # Click "Manage my subscription" if present; it opens
@@ -613,6 +702,17 @@ async def run_job(job: dict, cookies: list[dict]):
                                 except Exception:
                                     ptext = ""
                                 job["billing_platform"] = "stripe"
+                                # Record whose Stripe customer this is:
+                                # an empty portal ("No invoice history")
+                                # means THIS identity has no invoices,
+                                # even if another workspace/account does.
+                                job.setdefault("page_debug", {})["portal_empty"] = (
+                                    "No invoice history" in ptext)
+                                _nm = re.search(
+                                    r"BILLING INFORMATION.*?Name\s+([^\n]+)",
+                                    ptext, re.S)
+                                if _nm:
+                                    job["portal_billing_name"] = _nm.group(1).strip()[:60]
                                 # Stripe portal invoice rows are links; record
                                 # only rows actually rendered on the page.
                                 try:
@@ -653,6 +753,16 @@ async def run_job(job: dict, cookies: list[dict]):
                             await portal.wait_for_timeout(4000)
                             await _screenshot(portal, job, "stripe-portal.png", "stripe portal")
                             job["billing_platform"] = "stripe"
+                            try:
+                                _pt = await portal.inner_text("body")
+                                job.setdefault("page_debug", {})["portal_empty"] = (
+                                    "No invoice history" in _pt)
+                                _nm2 = re.search(
+                                    r"BILLING INFORMATION.*?Name\s+([^\n]+)", _pt, re.S)
+                                if _nm2:
+                                    job["portal_billing_name"] = _nm2.group(1).strip()[:60]
+                            except Exception:
+                                pass
                             # chrismazanec's selector for Stripe portal
                             # invoice links; tedbibr's href-based selector
                             # as a second pass.
@@ -718,6 +828,20 @@ async def run_job(job: dict, cookies: list[dict]):
                 if deduped and pdf_count == 0:
                     done_msg += ("注意：看到了交易记录，但没能下载到发票 PDF"
                                  "（点击行后未打开可下载的发票页），请把账单页截图发给开发者排查。")
+                dbg = job.get("page_debug") or {}
+                if not deduped and not dbg.get("billing_panel_loaded", True):
+                    if not dbg.get("sidebar_has_billing", True):
+                        done_msg += ("账单页没有加载出来：截图里是 General 设置页，"
+                                     "且设置侧栏里没有 Billing/Subscription 入口。"
+                                     "当前 session 对应的身份可能没有账单权限"
+                                     "（例如团队工作空间的成员身份，账单在管理员名下）。"
+                                     "请换成实际付费的账号（或工作空间管理员账号）的 session 再试。")
+                    else:
+                        done_msg += "账单页没有加载出来（截图里不是 Billing 面板），请重试一次。"
+                if dbg.get("portal_empty"):
+                    done_msg += "Stripe 门户里也显示没有发票记录（No invoice history）。"
+                if job.get("portal_billing_name"):
+                    done_msg += f"门户账单姓名：{job['portal_billing_name']}。"
                 update_job(job, status="completed", stage="done", progress=100,
                            message=done_msg)
             finally:

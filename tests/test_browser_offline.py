@@ -168,5 +168,42 @@ class TestInvoiceRowClick(unittest.TestCase):
             server.shutdown()
 
 
+class TestBillingPanelDetection(unittest.TestCase):
+    def test_general_panel_is_not_billing(self):
+        from app.browser_runner import _has_billing_content, _sidebar_has_billing
+        general = ("Settings General Language Send shortcut Higher intelligence "
+                   "Available reasoning efforts")
+        self.assertFalse(_has_billing_content(general))
+        billing = ("Settings Billing Current plan: ChatGPT Plus "
+                   "Transaction history Nov 12, 2026 ChatGPT Plus Paid")
+        self.assertTrue(_has_billing_content(billing))
+        sidebar_no_billing = ("General Appearance Notifications Profile "
+                              "Security and login Account Archived chats")
+        self.assertFalse(_sidebar_has_billing(sidebar_no_billing))
+        sidebar_with_billing = sidebar_no_billing + " Billing Subscription"
+        self.assertTrue(_sidebar_has_billing(sidebar_with_billing))
+
+    def test_wait_for_challenge_to_clear(self):
+        async def run():
+            from playwright.async_api import async_playwright
+            from app.browser_runner import _wait_for_challenge_to_clear
+            async with async_playwright() as pw:
+                b = await pw.firefox.launch(headless=True)
+                page = await b.new_page()
+                # Challenge text that clears itself after ~1.5s.
+                await page.set_content(
+                    "<body>Verify you are human</body>"
+                    "<script>setTimeout(() => { document.body.textContent = "
+                    "'ChatGPT home'; }, 1500);</script>")
+                self.assertTrue(await _wait_for_challenge_to_clear(
+                    page, timeout_s=10))
+                # Challenge that never clears.
+                await page.set_content("<body>Verify you are human</body>")
+                self.assertFalse(await _wait_for_challenge_to_clear(
+                    page, timeout_s=4))
+                await b.close()
+        asyncio.run(run())
+
+
 if __name__ == "__main__":
     unittest.main()
