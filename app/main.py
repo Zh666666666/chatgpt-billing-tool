@@ -70,6 +70,16 @@ async def health():
     return {"ok": True, "running_jobs": _running,
             "max_concurrent_jobs": MAX_CONCURRENT_JOBS}
 
+
+@app.get("/api/version")
+async def version():
+    # Proves which code the live host actually runs: compare with the
+    # pushed commit before reporting any fix as live. Render sets
+    # RENDER_GIT_COMMIT automatically; local runs report "unknown".
+    return {"commit": os.environ.get("RENDER_GIT_COMMIT")
+            or os.environ.get("GIT_COMMIT") or "unknown",
+            "app": "chatgpt-billing-tool", "version": "0.1.0"}
+
 @app.post("/api/jobs")
 async def create_job(req: Request):
     global _running
