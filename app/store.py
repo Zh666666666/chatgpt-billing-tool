@@ -92,6 +92,9 @@ def public_job(job: dict) -> dict:
         "files": job["files"],
         "error": job["error"],
         "log": job["log"],
+        "page_debug": job.get("page_debug", {}),
+        "workspace_billing": job.get("workspace_billing"),
+        "portal_billing": job.get("portal_billing"),
     }
 
 def update_job(job: dict, **fields):
