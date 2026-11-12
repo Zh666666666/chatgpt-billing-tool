@@ -16,7 +16,7 @@
 
 此前方案云端直接调用账户、订阅、账单内部接口，全部返回 HTTP 403 HTML。本工具**完全不走这条路**，不做任何到 `chatgpt.com/backend-api` 的服务端直连。
 
-唯一路径是真浏览器（Playwright Chromium）：
+唯一路径是真浏览器（Playwright Firefox——Cloudflare 会识别无头 Chromium，见 DEPLOY.md“403 的真正原因”）：
 
 ```
 chatgpt.com → Settings → Billing → Transaction history
@@ -56,7 +56,7 @@ chatgpt.com → Settings → Billing → Transaction history
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m playwright install chromium
+.venv/bin/python -m playwright install firefox chromium
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 # 打开 http://127.0.0.1:8000/
 ```
@@ -80,7 +80,7 @@ python3 -m venv .venv
 
 ## 部署
 
-见 [DEPLOY.md](DEPLOY.md)：Docker / docker-compose、Render Blueprint、Fly.io、VPS + Cloudflare Tunnel（临时公开网址）。长期公开部署需要一台能运行 Chromium 的服务器或浏览器托管服务，本机 Muse VM 不满足该条件，详见 DEPLOY.md 的“缺少什么”一节。
+见 [DEPLOY.md](DEPLOY.md)：Docker / docker-compose、Render Blueprint、Fly.io、VPS + Cloudflare Tunnel（临时公开网址）。长期公开部署需要一台能运行 Firefox 的服务器或浏览器托管服务，本机 Muse VM 不满足该条件，详见 DEPLOY.md 的“缺少什么”一节。
 
 ## 文件结构
 

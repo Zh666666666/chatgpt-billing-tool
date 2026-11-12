@@ -1,8 +1,8 @@
 """Offline tests: no chatgpt.com access needed.
 
-Proves the browser pipeline (Chromium launch, screenshot, DOM
+Proves the browser pipeline (Firefox launch, screenshot, DOM
 extraction, invoice-row parsing, per-job file isolation) works,
-even though this VM's egress proxy blocks Chromium's HTTPS tunnel
+even though this VM's egress proxy blocks the browser's HTTPS tunnel
 to chatgpt.com -- see README "本地限制". Real-account E2E still
 needs a deployment with direct internet.
 """
@@ -56,12 +56,11 @@ class TestExtraction(unittest.TestCase):
 
 
 class TestBrowserOffline(unittest.TestCase):
-    def test_chromium_screenshot_and_isolation(self):
+    def test_firefox_screenshot_and_isolation(self):
         async def run():
             from playwright.async_api import async_playwright
             async with async_playwright() as pw:
-                b = await pw.chromium.launch(
-                    headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                b = await pw.firefox.launch(headless=True)
                 p = await b.new_page(viewport={"width": 1280, "height": 900})
                 await p.set_content(
                     "<h1>Billing</h1><p>Current plan: ChatGPT Plus</p>"

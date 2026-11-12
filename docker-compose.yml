@@ -12,6 +12,6 @@ services:
       - GIT_COMMIT=${GIT_COMMIT:-unknown}
     volumes:
       - ./data:/app/data
-    # Playwright Chromium needs shared memory; without this, pages crash.
+    # The browser needs shared memory; without this, pages crash.
     shm_size: 2gb
     restart: unless-stopped

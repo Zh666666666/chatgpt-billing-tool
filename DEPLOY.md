@@ -4,7 +4,7 @@
 
 要长期、稳定地给 iPhone Safari 用，需要同时满足：
 
-1. **能运行 Chromium 的服务器**：Playwright + Chromium，约 2GB 共享内存，首次启动较慢。纯静态托管（GitHub Pages、Vercel 静态、Muse 静态页面）**不能**跑浏览器后端，不满足。
+1. **能运行浏览器的服务器**：Playwright + Firefox（注意：不是 Chromium——Cloudflare 会识别无头 Chromium，见下文“403 的真正原因”），约 2GB 共享内存，首次启动较慢。纯静态托管（GitHub Pages、Vercel 静态、Muse 静态页面）**不能**跑浏览器后端，不满足。
 2. **公网入站 HTTPS 地址**：手机能直接打开的网址。
 3. **持续运行**：任务是后台异步跑的，服务器不能随请求结束就停。
 
@@ -22,7 +22,7 @@
 
 - Fly.io：`fly launch`（选 Dockerfile），`fly deploy`；需要信用卡验证账号。
 - Railway：New Project → Deploy from GitHub Repo，选 Dockerfile；按量计费。
-- 两者都不需要改代码，`Dockerfile` 已用 Playwright 官方镜像（含 Chromium）。
+- 两者都不需要改代码，`Dockerfile` 已用 Playwright 官方镜像，并额外装了 Firefox。
 
 ## 方式 C：自己的 VPS / 服务器
 
@@ -60,5 +60,15 @@ cloudflared tunnel --url http://127.0.0.1:8000
 | `login_required` | session 过期 / 缺分段 / 不被接受，页面跳回登录页 |
 | `bot_check` | 遇到 Cloudflare / Turnstile 人机验证，不自动解 |
 | `access_denied_403` | chatgpt.com 返回 403，服务端拒绝本次访问（首次打开即 403 时会自动重试一次；仍 403 则如实失败） |
+
+## 403 的真正原因（2026-11-12 实测）
+
+最初以为是机房 IP 被封：Render 弗吉尼亚、Render 新加坡、租用的腾讯云服务器（43.128.86.133）三次实测都在首页 403。但在该服务器上进一步测试发现：
+
+- 不用浏览器、只用普通 HTTPS + Chrome UA 请求 `chatgpt.com` → **200**；
+- 同一 IP 上 Playwright 无头 Chromium 打开首页 → **403**，标题是 Cloudflare 的 "Just a moment..."；
+- 同一 IP 上 Playwright Firefox（配 Firefox UA）打开首页 → **200**，是真实首页。
+
+所以不是 IP 被硬封，而是 **Cloudflare 识别出了无头 Chromium**。修复方法是改用 Firefox（`app/browser_runner.py` 已改，`Dockerfile` 已装 Firefox）。如果将来 Firefox 也被识别，下一招是带虚拟显示器的有头模式（Xvfb），而不是继续换 IP。
 | `browser_error` | 服务器 Chromium 启动失败，检查内存 / 镜像 |
 | 账单为空但截图正常 | 可能是 Apple / Google Play 订阅（发票在应用商店），或页面结构变了；以截图为准，不要凭空补数据 |
