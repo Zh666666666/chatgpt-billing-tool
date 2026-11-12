@@ -88,5 +88,85 @@ class TestBrowserOffline(unittest.TestCase):
             delete_job(job_b["job_id"])
 
 
+class TestInvoiceRowClick(unittest.TestCase):
+    def test_same_tab_invoice_download(self):
+        """The Billing row carries no word 'Invoice'; clicking it must
+        still find the invoice page (same-tab navigation here) and
+        download the original PDF. The invoice page is served from a
+        local HTTP server: Firefox blocks top-level navigation to
+        data: URLs, so a data: URL cannot stand in for it."""
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        invoice_html = (
+            "<h1>Invoice number INV-TEST-0001</h1>"
+            "<p>ChatGPT Plus Subscription (per seat)</p>"
+            "<button id=\"dl\">Download invoice</button>"
+            "<script>document.getElementById('dl').onclick = () => {"
+            "const blob = new Blob(['%PDF-1.7 fake-invoice'],"
+            "{type: 'application/pdf'});"
+            "const a = document.createElement('a');"
+            "a.href = URL.createObjectURL(blob);"
+            "a.download = 'Invoice-INV-TEST-0001.pdf'; a.click();};</script>"
+        )
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = invoice_html.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        billing_html = (
+            "<h1>Billing</h1>"
+            f"<a role=\"button\" href=\"http://127.0.0.1:{port}/invoice\">"
+            "Nov 12, 2026  ChatGPT Plus  \u20b1982.14  Paid</a>"
+        )
+
+        async def run():
+            from playwright.async_api import async_playwright
+            from app.browser_runner import _download_invoice_pdfs
+            async with async_playwright() as pw:
+                b = await pw.firefox.launch(headless=True)
+                ctx = await b.new_context()
+                page = await ctx.new_page()
+                await page.set_content(billing_html)
+                job = new_job("session_cookie")
+                try:
+                    row_text = (await page.inner_text("a")).strip()
+                    invoices = [_parse_invoice_row_text(row_text)]
+                    debug = await _download_invoice_pdfs(
+                        page, ctx, job, invoices, time.time())
+                    self.assertEqual(debug["rows_clicked"], 1)
+                    self.assertEqual(debug["same_tab_navs"], 1)
+                    self.assertEqual(debug["pdfs"], 1)
+                    self.assertEqual(invoices[0].get("invoice_number"),
+                                     "INV-TEST-0001")
+                    pdf_name = invoices[0].get("pdf_file")
+                    self.assertIsNotNone(pdf_name)
+                    saved = [f for f in job["files"]
+                             if f["name"] == pdf_name]
+                    self.assertEqual(len(saved), 1)
+                    self.assertEqual(saved[0]["kind"], "invoice_pdf")
+                    return debug
+                finally:
+                    delete_job(job["job_id"])
+                    await b.close()
+        try:
+            asyncio.run(run())
+        finally:
+            server.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

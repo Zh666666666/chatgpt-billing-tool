@@ -278,6 +278,134 @@ async def _in_page_portal_url(page):
     except Exception:
         return None
 
+async def _download_invoice_pdfs(page, context, job, invoices, started):
+    """Click each Billing transaction row and download its invoice PDF.
+
+    Rows often carry NO word "Invoice" at all (just "Nov 12, 2026
+    ChatGPT Plus  ₱982.14  Paid"), so they are matched by date +
+    amount + Paid, not by the word Invoice. Clicking a row may open
+    invoice.stripe.com in a NEW tab, navigate the SAME tab there, or
+    open a modal -- all three are handled, then we come back and
+    continue with the next row. `invoices` already holds the parsed
+    row dicts in order; the matching entry is updated in place with
+    pdf_file / source / invoice_number when a PDF is downloaded.
+    Returns a small diagnostics dict, also stored on the job so the
+    UI can say exactly where invoice fetching stopped.
+    """
+    debug = {"rows_found": len(invoices), "rows_clicked": 0,
+             "new_tabs": 0, "same_tab_navs": 0, "modals": 0, "pdfs": 0}
+    job["invoice_debug"] = debug
+    for index in range(min(len(invoices), 5)):
+        if time.time() - started > TOTAL_TIMEOUT_S - 20:
+            break
+        inv = invoices[index]
+        row_text = (inv.get("raw_text") or "").strip()
+        if not row_text:
+            continue
+        try:
+            pages_before = set(context.pages)
+            url_before = page.url
+            # Click the innermost element whose text is this row.
+            # Whitespace must be normalised on both sides: the stored
+            # row text is flattened by _parse_invoice_row_text, while
+            # the DOM text may hold double spaces / line breaks.
+            clicked_text = await page.evaluate("""(wanted) => {
+              const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+              wanted = norm(wanted);
+              const els = document.querySelectorAll(
+                'button, a, [role="button"], [role="row"], tr, li, div');
+              let best = null;
+              for (const el of els) {
+                const t = norm(el.innerText);
+                if (!t || t.length > 300) continue;
+                if (t === wanted) {
+                  const hasChild = [...el.querySelectorAll('*')].some(
+                    c => norm(c.innerText) === wanted);
+                  if (!hasChild) { best = el; break; }
+                  if (!best) best = el;
+                }
+              }
+              if (!best) return null;
+              best.click();
+              return (best.innerText || '').trim().slice(0, 200);
+            }""", row_text)
+            if not clicked_text:
+                continue
+            debug["rows_clicked"] += 1
+            await page.wait_for_timeout(4000)
+            target = None
+            new_pages = [p for p in context.pages if p not in pages_before]
+            if new_pages:
+                # Case 1: invoice opened in a new tab.
+                target = new_pages[-1]
+                debug["new_tabs"] += 1
+                try:
+                    await target.wait_for_load_state("domcontentloaded", timeout=20000)
+                    await target.wait_for_timeout(2000)
+                except Exception:
+                    pass
+            elif page.url != url_before:
+                # Case 2: same-tab navigation to the invoice page.
+                target = page
+                debug["same_tab_navs"] += 1
+                try:
+                    await page.wait_for_timeout(2000)
+                except Exception:
+                    pass
+            if target is not None:
+                stext = ""
+                try:
+                    stext = await target.inner_text("body")
+                except Exception:
+                    stext = ""
+                if "invoice.stripe.com" in target.url or "Invoice" in stext:
+                    await _screenshot(target, job, f"invoice-page-{index+1}.png",
+                                      "invoice page")
+                    num_m = re.search(
+                        r"Invoice\s*(?:number|#)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-]{4,})",
+                        stext)
+                    if num_m:
+                        inv["invoice_number"] = num_m.group(1)
+                    inv["source"] = "invoice.stripe.com"
+                    pdf_name, _ = await _try_download_from_stripe_page(
+                        target, job, inv, len(invoices))
+                    if pdf_name:
+                        inv["pdf_file"] = pdf_name
+                        debug["pdfs"] += 1
+                try:
+                    if target is page:
+                        await page.go_back(wait_until="domcontentloaded",
+                                           timeout=15000)
+                        await page.wait_for_timeout(2000)
+                    else:
+                        await target.close()
+                except Exception:
+                    pass
+            else:
+                # Case 3: a modal/dialog on the same page.
+                try:
+                    dl = page.locator("text=Download invoice").first
+                    if await dl.count():
+                        debug["modals"] += 1
+                        pdf_name, _ = await _try_download_from_stripe_page(
+                            page, job, inv, len(invoices))
+                        if pdf_name:
+                            inv["pdf_file"] = pdf_name
+                            debug["pdfs"] += 1
+                        try:
+                            await page.locator(
+                                "button[aria-label='Close'], "
+                                "button:has-text('Close')"
+                            ).first.click(timeout=3000)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    return debug
+
+
 async def run_job(job: dict, cookies: list[dict]):
     started = time.time()
     invoices: list[dict] = []
@@ -421,7 +549,7 @@ async def run_job(job: dict, cookies: list[dict]):
                 try:
                     row_texts = await page.evaluate("""() => {
                       const out = [];
-                      const els = document.querySelectorAll('button, a, [role="row"], tr, li');
+                      const els = document.querySelectorAll('button, a, [role="button"], [role="row"], tr, li, div');
                       for (const el of els) {
                         const t = (el.innerText || '').trim();
                         if (!t) continue;
@@ -436,47 +564,10 @@ async def run_job(job: dict, cookies: list[dict]):
                 for rt in row_texts:
                     invoices.append(_parse_invoice_row_text(rt))
 
-                # Click invoice rows (limit 5) to open invoice.stripe.com
-                # and download the original PDF from there.
+                # Open each transaction row and download its invoice PDF.
                 update_job(job, stage="downloading_invoices", progress=70,
                            message="正在打开发票并下载原始 PDF…")
-                clicked = 0
-                try:
-                    candidates = page.locator("button, a").filter(
-                        has_text=re.compile(r"Open invoice|Invoice", re.I))
-                    count = await candidates.count()
-                    for i in range(min(count, 5)):
-                        if time.time() - started > TOTAL_TIMEOUT_S - 20:
-                            break
-                        try:
-                            async with context.expect_page(timeout=15000) as new_page_info:
-                                await candidates.nth(i).click(timeout=8000)
-                            stripe_page = await new_page_info.value
-                            await stripe_page.wait_for_load_state("domcontentloaded", timeout=20000)
-                            await stripe_page.wait_for_timeout(2000)
-                            stext = ""
-                            try:
-                                stext = await stripe_page.inner_text("body")
-                            except Exception:
-                                stext = ""
-                            if "invoice.stripe.com" in stripe_page.url or "Invoice" in stext:
-                                # Fill invoice number from the Stripe page if we have it.
-                                num_m = re.search(r"Invoice\s*(?:number|#)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-]{4,})", stext)
-                                inv = _parse_invoice_row_text(stext)
-                                if num_m:
-                                    inv["invoice_number"] = num_m.group(1)
-                                inv["source"] = "invoice.stripe.com"
-                                pdf_name, _ = await _try_download_from_stripe_page(
-                                    stripe_page, job, inv, len(invoices))
-                                if pdf_name:
-                                    inv["pdf_file"] = pdf_name
-                                invoices.append(inv)
-                                clicked += 1
-                            await stripe_page.close()
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
+                await _download_invoice_pdfs(page, context, job, invoices, started)
 
                 # --- Fallback: Subscription page + Stripe portal ---
                 if not invoices:
@@ -507,6 +598,15 @@ async def run_job(job: dict, cookies: list[dict]):
                                 await portal.wait_for_load_state("domcontentloaded", timeout=20000)
                                 await portal.wait_for_timeout(3000)
                                 await _screenshot(portal, job, "stripe-portal.png", "stripe portal")
+                                # The portal sometimes lands on the
+                                # subscription tab; open Invoice history.
+                                try:
+                                    hist = portal.get_by_text("Invoice history", exact=False).first
+                                    if await hist.count():
+                                        await hist.click(timeout=5000)
+                                        await portal.wait_for_timeout(3000)
+                                except Exception:
+                                    pass
                                 ptext = ""
                                 try:
                                     ptext = await portal.inner_text("body")
@@ -611,9 +711,15 @@ async def run_job(job: dict, cookies: list[dict]):
                     deduped.append(inv)
                 job["invoices"] = deduped
 
+                pdf_count = sum(1 for inv in deduped if inv.get("pdf_file"))
+                done_msg = (f"完成：找到 {len(deduped)} 条账单记录，"
+                            f"其中 {pdf_count} 张已下载原始发票 PDF，"
+                            f"订阅信息 {'已读取' if job.get('subscription') else '页面上未识别到'}。")
+                if deduped and pdf_count == 0:
+                    done_msg += ("注意：看到了交易记录，但没能下载到发票 PDF"
+                                 "（点击行后未打开可下载的发票页），请把账单页截图发给开发者排查。")
                 update_job(job, status="completed", stage="done", progress=100,
-                           message=(f"完成：找到 {len(deduped)} 条账单记录，"
-                                    f"订阅信息 {'已读取' if job.get('subscription') else '页面上未识别到'}。"))
+                           message=done_msg)
             finally:
                 await browser.close()
     except Exception as e:
