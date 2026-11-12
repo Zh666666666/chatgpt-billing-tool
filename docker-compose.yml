@@ -7,6 +7,9 @@ services:
       - DATA_DIR=/app/data
       - MAX_CONCURRENT_JOBS=2
       - JOB_TTL_SECONDS=1800
+      # Lets /api/version report the deployed commit. Set it at deploy time:
+      # GIT_COMMIT=$(git rev-parse HEAD) docker compose up -d
+      - GIT_COMMIT=${GIT_COMMIT:-unknown}
     volumes:
       - ./data:/app/data
     # Playwright Chromium needs shared memory; without this, pages crash.
