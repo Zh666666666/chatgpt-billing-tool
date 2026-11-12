@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ChatGPT 订阅与账单查询</title>
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--ink:#111;--mut:#666;--line:#e5e5e0;--acc:#111;--ok:#0a7a3d;--bad:#b00020;--warn:#8a5a00}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+main{max-width:720px;margin:0 auto;padding:16px 16px 48px}
+h1{font-size:22px;line-height:1.3;margin:8px 0 4px} p.sub{color:var(--mut);margin:0 0 16px;font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0}
+label{font-weight:600;display:block;margin:10px 0 6px}
+textarea{width:100%;min-height:120px;border:1px solid #ccc;border-radius:10px;padding:12px;font:13px/1.5 ui-monospace,Menlo,monospace;resize:vertical}
+.kinds{display:flex;gap:8px;flex-wrap:wrap} .kinds label{font-weight:400;border:1px solid #ccc;border-radius:999px;padding:8px 12px;margin:0;cursor:pointer}
+.kinds input{accent-color:#111}
+button.big{width:100%;background:var(--acc);color:#fff;border:0;border-radius:12px;padding:14px;font-size:17px;font-weight:700;margin-top:14px}
+button.big:disabled{opacity:.5} button.ghost{background:#fff;color:var(--ink);border:1px solid #ccc;border-radius:10px;padding:9px 14px;font-size:15px}
+.note{font-size:13px;color:var(--mut)} .warn{background:#fff7e0;border:1px solid #f0d48a;color:var(--warn);border-radius:10px;padding:10px 12px;font-size:14px;margin-top:10px}
+.err{background:#fdecec;border:1px solid #f3b0b0;color:var(--bad);border-radius:10px;padding:12px;font-size:14px;white-space:pre-wrap}
+.okbox{background:#eaf6ee;border:1px solid #bfe3c9;color:var(--ok);border-radius:10px;padding:12px;font-size:14px}
+.steps{list-style:none;padding:0;margin:0} .steps li{padding:8px 0;border-bottom:1px solid var(--line);font-size:15px}
+.steps li.done::before{content:"✓ ";color:var(--ok)} .steps li.now::before{content:"… ";color:var(--warn)}
+img.shot{width:100%;border:1px solid var(--line);border-radius:10px;display:block}
+.inv{border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0}
+.inv b{font-size:16px} .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+a.btn{display:inline-block;background:#111;color:#fff;text-decoration:none;border-radius:9px;padding:9px 13px;font-size:15px}
+a.btn2{display:inline-block;background:#fff;color:#111;border:1px solid #999;text-decoration:none;border-radius:9px;padding:9px 13px;font-size:15px}
+iframe.pdf{width:100%;height:70vh;border:1px solid var(--line);border-radius:10px;background:#fff}
+details{font-size:14px;color:var(--mut)} summary{cursor:pointer;color:var(--ink);font-weight:600}
+code{background:#eee;padding:1px 5px;border-radius:5px;font-size:13px}
+.hidden{display:none}
+</style>
+</head>
+<body><main>
+<h1>ChatGPT 订阅与账单查询</h1>
+<p class="sub">粘贴你自己的 session → 点击获取 → 在本页看真实订阅截图和账单，预览并下载原始发票 PDF。无需注册，不用账号密码。</p>
+
+<div class="card">
+  <label>凭据类型</label>
+  <div class="kinds">
+    <label><input type="radio" name="kind" value="session_cookie" checked> Session cookie（推荐）</label>
+    <label><input type="radio" name="kind" value="session_json"> Session JSON</label>
+    <label><input type="radio" name="kind" value="access_token"> Access token</label>
+  </div>
+  <div id="tokenWarn" class="warn hidden">Access token 不能替代 session cookie：它无法让浏览器登录 chatgpt.com，也打不开 Billing 和 Stripe 门户，所以无法截图、也无法下载发票 PDF。请改用 session cookie。</div>
+
+  <label for="cred">Session</label>
+  <textarea id="cred" placeholder="粘贴 __Secure-next-auth.session-token 的完整值，或全部 .0/.1 分段，或整条 Cookie 请求头" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+  <p class="note">怎么复制：在电脑浏览器登录 chatgpt.com → F12 → Application → Cookies → chatgpt.com → 复制 <code>__Secure-next-auth.session-token</code>；如果它被分成 <code>.0</code>、<code>.1</code>……，请全部复制。也可以在 Network 里复制整条 Cookie 请求头。不要发到聊天里，只粘贴在这里。</p>
+  <button class="big" id="go">获取订阅与账单</button>
+  <p class="note" id="privacy">隐私：session 只在本次任务的浏览器内存里用，不写入磁盘、不进日志、不进 URL；截图和发票只保存在本次任务目录，30 分钟后自动删除，不同任务用不同凭证互相隔离。本工具不购买、不取消、不修改订阅。</p>
+</div>
+
+<div class="card hidden" id="progCard">
+  <h2 style="font-size:17px;margin:0 0 8px">进度</h2>
+  <ul class="steps" id="steps"></ul>
+  <p class="note" id="progMsg"></p>
+  <button class="ghost" id="delBtn">删除本次任务与文件</button>
+</div>
+
+<div id="errBox" class="card hidden"><div class="err" id="errText"></div></div>
+<div id="result" class="hidden">
+  <div class="card" id="subCard"><h2 style="font-size:17px;margin:0 0 8px">订阅信息（仅展示实际获取到的数据）</h2><div id="subBody"></div></div>
+  <div class="card"><h2 style="font-size:17px;margin:0 0 8px">订阅 / 账单页面截图</h2><div id="shots"></div></div>
+  <div class="card"><h2 style="font-size:17px;margin:0 0 8px">账单</h2><div id="invBody"></div></div>
+</div>
+
+<div class="card"><details><summary>如果失败了，常见原因</summary>
+<p>1）<b>Session 未登录 / 已过期</b>：页面跳回登录页。请重新复制完整 session（含全部 .0/.1 分段）。<br>
+2）<b>浏览器人机验证</b>：遇到 Cloudflare / Turnstile，本工具不自动解验证，请稍后重试。<br>
+3）<b>HTTP 403</b>：服务端拒绝了本次访问。有效 session 不等于服务端一定放行。<br>
+4）<b>Apple / Google Play 订阅</b>：发票不在 Stripe，由苹果/谷歌开具，本页会如实说明，不会凭空生成 PDF。<br>
+5）本工具不保证一定成功；失败时会明确写出失败阶段，不会只给一个入口链接。</p></details></div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const STAGES=[["received","已收到"],["launching_browser","启动浏览器"],["opening_chatgpt","打开 ChatGPT"],["checking_login","检查登录状态"],["opening_billing","打开 Billing"],["listing_invoices","读取交易记录"],["downloading_invoices","下载发票 PDF"],["opening_subscription","尝试 Subscription / Stripe 门户"],["resolving_stripe_portal","从浏览器内解析 Stripe 门户"],["done","完成"]];
+let job=null, timer=null, fileToken="";
+function stageLabel(s){const f=STAGES.find(x=>x[0]===s);return f?f[1]:s}
+function renderSteps(cur){
+  const order=STAGES.map(x=>x[0]); const idx=order.indexOf(cur);
+  $("#steps").innerHTML=STAGES.map(([k,label],i)=>{
+    const cls=i<idx||cur==="done"&&i<=idx?"done":(k===cur?"now":"");
+    return `<li class="${cls}">${label}</li>`}).join("");
+}
+function fileUrl(name,dl){return `/api/jobs/${job.job_id}/files/${encodeURIComponent(name)}?token=${encodeURIComponent(fileToken)}${dl?"&download=1":""}`}
+function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+async function poll(){
+  const r=await fetch(`/api/jobs/${job.job_id}`);
+  if(!r.ok){$("#errText").textContent="任务不存在或已过期（文件保留 30 分钟）。";$("#errBox").classList.remove("hidden");clearInterval(timer);return}
+  const j=await r.json();
+  renderSteps(j.stage); $("#progMsg").textContent=j.message||"";
+  if(j.status==="failed"){
+    clearInterval(timer);
+    const e=j.error||{};
+    $("#errText").textContent=`失败阶段：${stageLabel(e.stage||j.stage)}\n原因：${e.message||j.message}\n${e.hint?"建议："+e.hint:""}${e.http_status?"\nHTTP 状态："+e.http_status:""}${e.url?"\n当时页面："+e.url:""}`;
+    $("#errBox").classList.remove("hidden");
+    if(j.files&&j.files.length) renderShots(j);
+    return;
+  }
+  if(j.status==="completed"){
+    clearInterval(timer);
+    $("#result").classList.remove("hidden");
+    const s=j.subscription;
+    $("#subBody").innerHTML=s?Object.entries(s).filter(([k])=>k!=="source_text_excerpt").map(([k,v])=>`<div><b>${esc(k)}</b>：${esc(v)}</div>`).join("")+`<p class="note">来源页面原文摘录：${esc(s.source_text_excerpt||"")}</p>`:`<p>本次在页面上没有识别到可确认的订阅字段（例如套餐、续费时间）。请查看下方截图核对；未找到的字段不会凭空填写。</p><p class="note">计费平台：${esc(j.billing_platform||"未知")}</p>`;
+    renderShots(j); renderInvoices(j);
+  }
+}
+function renderShots(j){
+  const shots=j.files.filter(f=>f.kind==="screenshot");
+  $("#shots").innerHTML=shots.length?shots.map(f=>`<p><b>${esc(f.name)}</b> (${Math.round(f.size/1024)} KB)</p><img class="shot" src="${fileUrl(f.name,0)}" alt="${esc(f.name)}"><div class="row"><a class="btn" href="${fileUrl(f.name,1)}">下载图片</a><a class="btn2" href="${fileUrl(f.name,0)}" target="_blank" rel="noopener">新窗口打开</a></div>`).join(""):"<p>本次没有生成截图。</p>";
+}
+function renderInvoices(j){
+  const invs=j.invoices||[];
+  if(!invs.length){$("#invBody").innerHTML="<p>本次没有找到可访问的账单记录。这不代表你没有订阅：可能是账单在 Apple / Google Play、或页面结构变了。请看截图核对。</p>";return}
+  $("#invBody").innerHTML=invs.map((v,i)=>{
+    const pdf=v.pdf_file;
+    return `<div class="inv"><b>${esc(v.date||"日期未知")}</b> · ${esc(v.amount_text||"金额未知")} · ${esc(v.status||"状态未知")}<br><span class="note">发票号：${esc(v.invoice_number||"未识别")} ${v.source?("· 来源："+esc(v.source)):""}</span>${pdf?`<div class="row"><a class="btn" href="${fileUrl(pdf,1)}">下载原始 PDF</a><a class="btn2" href="#" data-pdf="${esc(pdf)}" data-i="${i}">页内预览</a></div><div id="prev-${i}"></div>`:`<p class="note">本次没有下载到这张发票的原始 PDF（可能需要单独打开 Stripe 发票页）。不要把入口链接当成发票。</p>`}</div>`}).join("");
+  document.querySelectorAll("[data-pdf]").forEach(a=>a.addEventListener("click",ev=>{ev.preventDefault();const i=a.dataset.i;document.getElementById("prev-"+i).innerHTML=`<iframe class="pdf" src="${fileUrl(a.dataset.pdf,0)}"></iframe>`}));
+}
+document.querySelectorAll('input[name="kind"]').forEach(r=>r.addEventListener("change",()=>{$("#tokenWarn").classList.toggle("hidden",document.querySelector('input[name="kind"]:checked').value!=="access_token")}));
+$("#go").addEventListener("click",async()=>{
+  const kind=document.querySelector('input[name="kind"]:checked').value;
+  const cred=$("#cred").value.trim();
+  if(!cred){alert("请先粘贴 session");return}
+  $("#go").disabled=true; $("#go").textContent="正在获取…"; $("#errBox").classList.add("hidden"); $("#result").classList.add("hidden");
+  try{
+    let r;
+    try{
+      r=await fetch("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({credential:cred,credential_kind:kind})});
+    }catch(e){
+      throw new Error("连不上后端服务：这个页面目前只是前端文件，后端没有在运行。请用部署好的网址打开本页（见 README / DEPLOY.md），不要直接打开 index.html 文件。");
+    }
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(d.detail||("请求失败 "+r.status));
+    job=d; fileToken=d.file_token;
+    $("#cred").value=""; // 提交后立即清空输入框，减少残留
+    $("#progCard").classList.remove("hidden"); renderSteps("received");
+    clearInterval(timer); timer=setInterval(poll,2000); poll();
+  }catch(e){$("#errText").textContent=e.message;$("#errBox").classList.remove("hidden")}
+  finally{$("#go").disabled=false;$("#go").textContent="获取订阅与账单"}
+});
+$("#delBtn").addEventListener("click",async()=>{if(!job)return;await fetch(`/api/jobs/${job.job_id}`,{method:"DELETE"});clearInterval(timer);$("#progMsg").textContent="已删除本次任务与文件。";$("#result").classList.add("hidden")});
+</script>
+</body></html>

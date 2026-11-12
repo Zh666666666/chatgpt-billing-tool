@@ -1,0 +1,14 @@
+services:
+  billing-tool:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATA_DIR=/app/data
+      - MAX_CONCURRENT_JOBS=2
+      - JOB_TTL_SECONDS=1800
+    volumes:
+      - ./data:/app/data
+    # Playwright Chromium needs shared memory; without this, pages crash.
+    shm_size: 2gb
+    restart: unless-stopped

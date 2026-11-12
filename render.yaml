@@ -1,0 +1,15 @@
+# Render.com Blueprint: Docker runtime (required for Playwright/Chromium).
+# In Render: New -> Blueprint -> connect this repo. No API key / Stripe
+# key / OpenAI key is needed. Free tier will sleep and is slow to start
+# a browser; Standard ($7+/mo) is recommended for real use.
+services:
+  - type: web
+    name: chatgpt-billing-tool
+    env: docker
+    plan: standard
+    healthCheckPath: /api/health
+    envVars:
+      - key: MAX_CONCURRENT_JOBS
+        value: "2"
+      - key: JOB_TTL_SECONDS
+        value: "1800"
